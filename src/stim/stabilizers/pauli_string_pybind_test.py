@@ -955,3 +955,106 @@ def test_before_reset():
         stim.PauliString("Z").before(stim.Circuit("MX 0"))
     with pytest.raises(ValueError):
         stim.PauliString("Z").before(stim.Circuit("MY 0"))
+
+
+def test_dict_int_str_constructor():
+    """Test dict[int, int|str] constructor format. keys - qubits indices."""
+    # Basic functionality
+    assert str(stim.PauliString({5: "X", 7: "Y"})) == str(stim.PauliString("_____X_Y"))
+    
+    # Using integer values
+    # 1=X, 3=Z
+    assert stim.PauliString({0: 1, 2: 3}) == stim.PauliString("X_Z")
+    
+    # Mixed int and string values
+    assert stim.PauliString({1: "Y", 3: 2, 5: "Z"}) == stim.PauliString("_Y_Y_Z")
+    
+    # Identity operations
+    assert stim.PauliString({0: "I", 2: "_", 4: 0}) == stim.PauliString("_____")
+    
+    # Empty dict
+    assert stim.PauliString({}) == stim.PauliString("")
+    
+    # Single qubit
+    assert stim.PauliString({0: "X"}) == stim.PauliString("X")
+
+
+def test_dict_str_int_constructor():
+    """Test dict[str, int|Iterable[int]] constructor format. keys - pauli characters."""
+    # Basic functionality with single qubit indices
+    assert stim.PauliString({"X": 5, "Y": 7}) == stim.PauliString("_____X_Y")
+    
+    # Using iterables for multiple qubits
+    assert stim.PauliString({"X": 5, "Y": [6, 7]}) == stim.PauliString("_____XYY")
+    
+    # More complex example
+    assert stim.PauliString({"I": 3, "X": [0, 2], "Y": 1, "Z": [5, 6, 7]}) == stim.PauliString("XYX__ZZZ")
+    
+    # Identity operations
+    assert stim.PauliString({"I": [0, 1, 2]}) == stim.PauliString("___")
+    
+    # Single qubit with single pauli
+    assert stim.PauliString({"Z": 0}) == stim.PauliString("Z")
+    
+    # List with single element
+    assert stim.PauliString({"X": [2]}) == stim.PauliString("__X")
+
+
+def test_dict_constructor_duplicate_qubit_errors():
+    """Test that duplicate qubit specifications raise ValueError."""
+    # Note: Python dict will overwrite duplicate keys, so {0: "X", 0: "Y"} becomes {0: "Y"}
+    # and won't trigger our duplicate check. Test real duplicates instead.
+
+    with pytest.raises(ValueError, match="Qubit specified twice"):
+        stim.PauliString({"X": 0, "Y": 0})
+    
+    with pytest.raises(ValueError, match="Qubit specified twice"):
+        stim.PauliString({"X": [0, 1], "Y": [1, 2]})  # qubit 1 appears twice
+    
+    with pytest.raises(ValueError, match="Qubit specified twice"):
+        stim.PauliString({"X": 0, "Y": [0, 1]})  # qubit 0 appears twice
+
+
+def test_dict_constructor_error_cases():
+    """Test error cases for dict constructors."""
+    with pytest.raises(ValueError, match="Don't know how to convert"):
+        stim.PauliString({0: "Q"})  # Invalid pauli character
+    
+    with pytest.raises(ValueError, match="Don't know how to convert"):
+        stim.PauliString({0: 4})  # Invalid pauli integer
+    
+    with pytest.raises(ValueError, match="Don't know how to convert"):
+        stim.PauliString({0: -1})  # Negative pauli integer
+    
+    with pytest.raises(ValueError, match="Don't know how to convert"):
+        stim.PauliString({"Q": 0})  # Invalid pauli character
+    
+    with pytest.raises(ValueError, match="Pauli key must be single character"):
+        stim.PauliString({"XY": 0})  # Multi-character key
+    
+    # Invalid qubit indices
+    with pytest.raises(ValueError, match="Qubit indices must be int or iterable of ints"):
+        stim.PauliString({"X": "not_an_int"})
+    
+    # Mixed key types (should be all int or all str)
+    with pytest.raises(ValueError, match="Dict keys must be either all integers or all single-character strings"):
+        stim.PauliString({0: "X", "Y": 1})  # Mixed int and str keys
+
+
+def test_dict_constructor_case_insensitive():
+    """Test that both uppercase and lowercase pauli characters work."""
+    assert stim.PauliString({0: "x", 1: "y", 2: "z"}) == stim.PauliString("XYZ")
+    
+    assert stim.PauliString({"x": 0, "y": 1, "z": 2}) == stim.PauliString("XYZ")
+
+def test_dict_constructor_edge_cases():
+    """Test edge cases for dict constructors."""
+    # Large qubit indices
+    p1 = stim.PauliString({100: "X"})
+    assert len(p1) == 101
+    assert p1[100] == 1  # X
+    assert all(p1[i] == 0 for i in range(100))  # All others are I
+    
+    # Multiple paulis on consecutive qubits
+    p3 = stim.PauliString({"X": [0, 1, 2, 3, 4]})
+    assert p3 == stim.PauliString("XXXXX")

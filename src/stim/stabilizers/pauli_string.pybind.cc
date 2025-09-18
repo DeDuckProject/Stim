@@ -24,6 +24,36 @@
 using namespace stim;
 using namespace stim_pybind;
 
+// Parses a Python handle into 0=I,1=X,2=Y,3=Z, or throws if invalid.
+static uint8_t parse_pauli_value(const pybind11::handle &h) {
+    int64_t v = -1;
+    if (pybind11::isinstance<pybind11::int_>(h)) {
+        try {
+            v = pybind11::cast<int64_t>(h);
+        } catch (const pybind11::cast_error &) {
+        }
+    } else if (pybind11::isinstance<pybind11::str>(h)) {
+        std::string_view s = pybind11::cast<std::string_view>(h);
+        if (s == "I" || s == "_") {
+            v = 0;
+        } else if (s == "X" || s == "x") {
+            v = 1;
+        } else if (s == "Y" || s == "y") {
+            v = 2;
+        } else if (s == "Z" || s == "z") {
+            v = 3;
+        }
+    }
+    if (v >= 0 && v < 4) {
+        return (uint8_t)v;
+    }
+    throw std::invalid_argument(
+        "Don't know how to convert " +
+        pybind11::cast<std::string>(pybind11::repr(h)) +
+        " into a pauli.\n"
+        "Expected something from {0, 1, 2, 3, 'I', 'X', 'Y', 'Z', '_'}.");
+}
+
 pybind11::object flex_pauli_string_to_unitary_matrix(const stim::FlexPauliString &ps, std::string_view endian) {
     bool little_endian;
     if (endian == "little") {
@@ -359,36 +389,121 @@ void stim_pybind::pybind_pauli_string_methods(pybind11::module &m, pybind11::cla
                     return pybind11::cast<FlexPauliString>(other_or);
                 }
 
+                // Handle dict input:
+                if (pybind11::isinstance<pybind11::dict>(arg)) {
+                    pybind11::dict d = pybind11::cast<pybind11::dict>(arg);
+
+                    if (d.size() > 0) {
+                        auto first_key = d.begin()->first;
+                        if (pybind11::isinstance<pybind11::int_>(first_key)) {
+                            // Keys are integers (dict[int, int|str] format)
+                            // Format: dict[int, int|str] - qubit index -> pauli
+                            size_t max_qubit = 0;
+                            std::map<size_t, uint8_t> qubit_paulis;
+                            
+                            for (const auto &item : d) {
+                                if (!pybind11::isinstance<pybind11::int_>(item.first)) {
+                                    throw std::invalid_argument(
+                                        "Dict keys must be either all integers or all single-character strings. Got key: " +
+                                        pybind11::cast<std::string>(pybind11::repr(item.first)));
+                                }
+                                size_t qubit_idx = pybind11::cast<size_t>(item.first);
+                                uint8_t pauli_val = parse_pauli_value(item.second);
+                                
+                                if (qubit_paulis.find(qubit_idx) != qubit_paulis.end()) {
+                                    throw std::invalid_argument("Qubit specified twice: qubit " + std::to_string(qubit_idx));
+                                }
+                                
+                                qubit_paulis[qubit_idx] = pauli_val;
+                                max_qubit = std::max(max_qubit, qubit_idx);
+                            }
+                            
+                            FlexPauliString result(max_qubit + 1);
+                            for (const auto &[qubit_idx, pauli_val] : qubit_paulis) {
+                                uint8_t p = pauli_val;
+                                p ^= p >> 1;  // Convert xyz to xz encoding
+                                result.value.xs[qubit_idx] = p & 1;
+                                result.value.zs[qubit_idx] = (p & 2) >> 1;
+                            }
+                            return result;
+                        }
+                        else if (pybind11::isinstance<pybind11::str>(first_key)) {
+                            // Keys are strings (dict[str, int|Iterable[int]] format)
+                            // Format: dict[str, int|Iterable[int]] - pauli -> qubit indices
+                            std::set<size_t> used_qubits;
+                            std::vector<std::pair<size_t, uint8_t>> qubit_pauli_pairs;
+                            size_t max_qubit = 0;
+                            
+                            for (const auto &item : d) {
+                                if (!pybind11::isinstance<pybind11::str>(item.first)) {
+                                    throw std::invalid_argument(
+                                        "Dict keys must be either all integers or all single-character strings. Got key: " +
+                                        pybind11::cast<std::string>(pybind11::repr(item.first)));
+                                }
+                                std::string_view pauli_str = pybind11::cast<std::string_view>(item.first);
+                                if (pauli_str.length() != 1) {
+                                    throw std::invalid_argument("Pauli key must be single character, got: '" + std::string(pauli_str) + "'");
+                                }
+                                
+                                uint8_t pauli_val = parse_pauli_value(item.first);
+                                
+                                // Handle qubit indices (int or iterable of ints)
+                                if (pybind11::isinstance<pybind11::int_>(item.second)) {
+                                    // Entry is an int
+                                    size_t qubit_idx = pybind11::cast<size_t>(item.second);
+                                    if (used_qubits.find(qubit_idx) != used_qubits.end()) {
+                                        throw std::invalid_argument("Qubit specified twice: qubit " + std::to_string(qubit_idx));
+                                    }
+                                    used_qubits.insert(qubit_idx);
+                                    qubit_pauli_pairs.emplace_back(qubit_idx, pauli_val);
+                                    max_qubit = std::max(max_qubit, qubit_idx);
+                                } else if (pybind11::isinstance<pybind11::iterable>(item.second) && !pybind11::isinstance<pybind11::str>(item.second)) {
+                                    // Entry is a list (but not a string, since strings are iterable too)
+                                    for (const pybind11::handle &h : item.second) {
+                                        if (!pybind11::isinstance<pybind11::int_>(h)) {
+                                            throw std::invalid_argument(
+                                                "Qubit indices must be int or iterable of ints, got iterable containing: " +
+                                                pybind11::cast<std::string>(pybind11::repr(h)));
+                                        }
+                                        size_t qubit_idx = pybind11::cast<size_t>(h);
+                                        if (used_qubits.find(qubit_idx) != used_qubits.end()) {
+                                            throw std::invalid_argument("Qubit specified twice: qubit " + std::to_string(qubit_idx));
+                                        }
+                                        used_qubits.insert(qubit_idx);
+                                        qubit_pauli_pairs.emplace_back(qubit_idx, pauli_val);
+                                        max_qubit = std::max(max_qubit, qubit_idx);
+                                    }
+                                } else {
+                                    throw std::invalid_argument(
+                                        "Qubit indices must be int or iterable of ints, got: " +
+                                        pybind11::cast<std::string>(pybind11::repr(item.second)));
+                                }
+                            }
+                            
+                            FlexPauliString result(max_qubit + 1);
+                            for (const auto &[qubit_idx, pauli_val] : qubit_pauli_pairs) {
+                                uint8_t p = pauli_val;
+                                p ^= p >> 1;  // Convert xyz to xz encoding
+                                result.value.xs[qubit_idx] = p & 1;
+                                result.value.zs[qubit_idx] = (p & 2) >> 1;
+                            }
+                            return result;
+                        } else {
+                            throw std::invalid_argument(
+                                "Dict keys must be either all integers or all single-character strings. Got key: " +
+                                pybind11::cast<std::string>(pybind11::repr(first_key)));
+                        }
+                    } else {
+                        // Empty dict
+                        return FlexPauliString(0);
+                    }
+                }
+
                 pybind11::object pauli_indices_or = pybind11::isinstance<pybind11::iterable>(arg) ? arg : pauli_indices;
                 if (!pauli_indices_or.is_none()) {
                     std::vector<uint8_t> ps;
                     for (const pybind11::handle &h : pauli_indices_or) {
-                        int64_t v = -1;
-                        if (pybind11::isinstance<pybind11::int_>(h)) {
-                            try {
-                                v = pybind11::cast<int64_t>(h);
-                            } catch (const pybind11::cast_error &) {
-                            }
-                        } else if (pybind11::isinstance<pybind11::str>(h)) {
-                            std::string_view s = pybind11::cast<std::string_view>(h);
-                            if (s == "I" || s == "_") {
-                                v = 0;
-                            } else if (s == "X" || s == "x") {
-                                v = 1;
-                            } else if (s == "Y" || s == "y") {
-                                v = 2;
-                            } else if (s == "Z" || s == "z") {
-                                v = 3;
-                            }
-                        }
-                        if (v >= 0 && v < 4) {
-                            ps.push_back((uint8_t)v);
-                        } else {
-                            throw std::invalid_argument(
-                                "Don't know how to convert " + pybind11::cast<std::string>(pybind11::repr(h)) +
-                                " into a pauli.\n"
-                                "Expected something from {0, 1, 2, 3, 'I', 'X', 'Y', 'Z', '_'}.");
-                        }
+                        ps.push_back(parse_pauli_value(h));
                     }
                     FlexPauliString result(ps.size());
                     for (size_t k = 0; k < ps.size(); k++) {
@@ -413,7 +528,7 @@ void stim_pybind::pybind_pauli_string_methods(pybind11::module &m, pybind11::cla
         pybind11::arg("other") = pybind11::none(),
         pybind11::arg("pauli_indices") = pybind11::none(),
         clean_doc_string(R"DOC(
-            @signature def __init__(self, arg: Union[None, int, str, stim.PauliString, Iterable[Union[int, 'Literal["_", "I", "X", "Y", "Z"]']]] = None, /) -> None:
+            @signature def __init__(self, arg = None, /) -> None:
             Initializes a stim.PauliString from the given argument.
 
             When given a string, the string is parsed as a pauli string. The string can
@@ -433,6 +548,14 @@ void stim_pybind::pybind_pauli_string_methods(pybind11::module &m, pybind11::cla
                     Iterable: initializes by interpreting each item as a Pauli.
                         Each item can be a single-qubit Pauli string (like "X"),
                         or an integer. Integers use the convention 0=I, 1=X, 2=Y, 3=Z.
+                    Dict[int, Union[int, str]]: initializes by mapping qubit indices to 
+                        Paulis. Keys are qubit indices, values are Pauli operators (0=I, 
+                        1=X, 2=Y, 3=Z or "I"/"X"/"Y"/"Z"). Qubits not specified default to 
+                        identity.
+                    Dict[str, Union[int, Iterable[int]]]: initializes by mapping Pauli 
+                        operators to qubit indices. Keys are single-character Pauli strings 
+                        ("I", "X", "Y", "Z"), values are either a single qubit index or an 
+                        iterable of qubit indices.
 
             Examples:
                 >>> import stim
@@ -460,6 +583,12 @@ void stim_pybind::pybind_pauli_string_methods(pybind11::module &m, pybind11::cla
 
                 >>> stim.PauliString("X6*Y6")
                 stim.PauliString("+i______Z")
+
+                >>> stim.PauliString({5: "X", 7: "Y"})
+                stim.PauliString("+_____X_Y")
+
+                >>> stim.PauliString({"X": 5, "Y": [6, 7]})
+                stim.PauliString("+_____XYY")
         )DOC")
             .data());
 
