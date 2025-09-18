@@ -24,6 +24,14 @@
 using namespace stim;
 using namespace stim_pybind;
 
+// Converts a Pauli value (0=I,1=X,2=Y,3=Z) to XZ encoding and sets the corresponding bits.
+static void set_pauli_at_index(FlexPauliString &result, size_t index, uint8_t pauli_val) {
+    uint8_t p = pauli_val;
+    p ^= p >> 1;  // Convert xyz to xz encoding
+    result.value.xs[index] = p & 1;
+    result.value.zs[index] = p & 2;
+}
+
 // Parses a Python handle into 0=I,1=X,2=Y,3=Z, or throws if invalid.
 static uint8_t parse_pauli_value(const pybind11::handle &h) {
     int64_t v = -1;
@@ -420,10 +428,7 @@ void stim_pybind::pybind_pauli_string_methods(pybind11::module &m, pybind11::cla
                             
                             FlexPauliString result(max_qubit + 1);
                             for (const auto &[qubit_idx, pauli_val] : qubit_paulis) {
-                                uint8_t p = pauli_val;
-                                p ^= p >> 1;  // Convert xyz to xz encoding
-                                result.value.xs[qubit_idx] = p & 1;
-                                result.value.zs[qubit_idx] = (p & 2) >> 1;
+                                set_pauli_at_index(result, qubit_idx, pauli_val);
                             }
                             return result;
                         }
@@ -482,10 +487,7 @@ void stim_pybind::pybind_pauli_string_methods(pybind11::module &m, pybind11::cla
                             
                             FlexPauliString result(max_qubit + 1);
                             for (const auto &[qubit_idx, pauli_val] : qubit_pauli_pairs) {
-                                uint8_t p = pauli_val;
-                                p ^= p >> 1;  // Convert xyz to xz encoding
-                                result.value.xs[qubit_idx] = p & 1;
-                                result.value.zs[qubit_idx] = (p & 2) >> 1;
+                                set_pauli_at_index(result, qubit_idx, pauli_val);
                             }
                             return result;
                         } else {
@@ -507,10 +509,7 @@ void stim_pybind::pybind_pauli_string_methods(pybind11::module &m, pybind11::cla
                     }
                     FlexPauliString result(ps.size());
                     for (size_t k = 0; k < ps.size(); k++) {
-                        uint8_t p = ps[k];
-                        p ^= p >> 1;
-                        result.value.xs[k] = p & 1;
-                        result.value.zs[k] = p & 2;
+                        set_pauli_at_index(result, k, ps[k]);
                     }
                     return result;
                 }
